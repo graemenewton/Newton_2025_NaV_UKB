@@ -9,3 +9,54 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+# Analysis of SCN9A/NaV1.7 Channelopathy Variant Carriers
+This document contains the code to reproduce the analysis of Newton et al. 2024.
+
+Note that the data must be downloaded from DNAnexus and pasted into the /data folder of this repository. The code to generate all the data required for this analysis is in the /DNAnexus folder. Note that a spark cluster instance must be used to download the data. The computational requirements to download some of the phenotype data, particularly the prescription data, are quite large. Please use a suitably powerful compute instance. If there are errors downloading the phenotype data from DNAnexus, this is most likely due to the instance not having enough RAM.
+
+The requirements to run this code locally are minimum of 16GB RAM - this is due to the size of the data files that must be loaded. The code has been written in a way so that if this repository is cloned, and the working directory is set to ~/Newton_NaV1.7_UKB, the the code will run without any changes required to the filepath names.
+
+```{r install_packages, warnings = FALSE, messages = FALSE}
+# List the packages to install
+package_list <- c(
+  "here",
+  # "dplyr",
+  # "tidyr",
+  # "stringr",
+  # "tibble",
+  # "R.utils",
+  # "remotes",
+  # "devtools",
+  # "clipr",
+  # "shiny",
+  # "reshape2",
+  # "plotly",
+  # "heatmaply",
+  # "data.table",
+  # "readxl",
+  # "R.utils",
+  # "tictoc",
+  # "ggplot2"
+)
+
+# Install them
+new_packages <-
+  package_list[!(package_list %in% installed.packages()[, "Package"])]
+if (length(new_packages)) {
+  install.packages(new_packages)
+}
+eval(parse(text = paste0("library(", package_list, ")")))
+
+# Return message to user and clean up
+cat("Packages installed: \n", sprintf("%s\n", package_list))
+rm(new_packages, package_list)
+gc()
+```
+
+
+```{r}
+
+```
+
+
