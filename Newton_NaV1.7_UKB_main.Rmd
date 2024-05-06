@@ -13,14 +13,16 @@ knitr::opts_chunk$set(echo = TRUE)
 # Analysis of SCN9A/NaV1.7 Channelopathy Variant Carriers
 This document contains the code to reproduce the analysis of Newton et al. 2024.
 
-Note that the data must be downloaded from DNAnexus and pasted into the /data folder of this repository. The code to generate all the data required for this analysis is in the /DNAnexus folder. Note that a spark cluster instance must be used to download the data. The computational requirements to download some of the phenotype data, particularly the prescription data, are quite large. Please use a suitably powerful compute instance. If there are errors downloading the phenotype data from DNAnexus, this is most likely due to the instance not having enough RAM.
+Note that the data must be downloaded from DNAnexus and copied into the /data folder of this repository. The code to generate all the data required for this analysis is in the /DNAnexus_scripts folder. Note that a spark cluster instance must be used to download the data. The computational requirements to download some of the phenotype data, particularly the prescription data, are quite large. Please use a suitably powerful compute instance. If there are errors downloading the phenotype data from DNAnexus, this is most likely due to the instance not having enough RAM.
 
-The requirements to run this code locally are minimum of 16GB RAM - this is due to the size of the data files that must be loaded. The code has been written in a way so that if this repository is cloned, and the working directory is set to ~/Newton_NaV1.7_UKB, the the code will run without any changes required to the filepath names.
+The requirements to run this code locally are minimum of 16GB RAM - this is due to the size of the data files that must be loaded. The code has been written in a way so that if this repository is cloned, and the working directory is set to ~/Newton_NaV1.7_UKB, the the code will run without any changes required to the file path names.
 
 ```{r install_packages, warnings = FALSE, messages = FALSE}
 # List the packages to install
 package_list <- c(
   "here",
+  "data.table",
+  "readxl"#,
   # "dplyr",
   # "tidyr",
   # "stringr",
@@ -33,8 +35,6 @@ package_list <- c(
   # "reshape2",
   # "plotly",
   # "heatmaply",
-  # "data.table",
-  # "readxl",
   # "R.utils",
   # "tictoc",
   # "ggplot2"
@@ -54,9 +54,40 @@ rm(new_packages, package_list)
 gc()
 ```
 
-
+# Load Data and Dictionaries
 ```{r}
+# Load UK Biobank coding and data dictionary
+coding <- fread(here("data", "Codings.csv"))
+dict <- fread(here("data", "Data_Dictionary_Showcase.csv"))
+
+# Load phenotype data
+eop <- fread(here("data", "UKB_EOP.csv.gz"))
+general <- fread(here("data", "UKB_general.csv.gz"))
+rx_analgesics <- fread(here("data", "UKB_Rx_analgesics.csv.gz"))
+rx_unique <- fread(here("data", "UKB_Rx_unique_drugs.csv.gz"))
+
+# Load NaV1.7 mutation list
+IEM_mutations <- read_xlsx(here("data", "IEM_Mutation_Table.xlsx"))
+
+# Load genotype data
+SCN9A_anno <- fread(here("data", "SCN9A_anno_protein_coding.vcf"))
+vcf_metadata <- fread(here("data", "SCN9A_anno_protein_coding.vcf"), nrows = 62, header = FALSE, fill = TRUE)
+SCN9A_gcount <- fread(here("data", "SCN9A_counts.txt"))
 
 ```
 
+# Data Preperation
+```{r}
+# Extract the name of the annotation columns from the metadata
+anno_cols <- str_extract(vcf_metadata[8,], "Allele(.+)")
+anno_cols <- gsub("\\\">$", "", anno_cols)  # Remove trailing characters
+anno_cols <- strsplit(anno_cols, "\\|")  # Split into a list of annotations
+
+# Separate the columns in annotated SCN9a_gene vcf based on the extracted annotations
+SCN9A_anno <- separate(SCN9A_anno, 8, into = anno_cols[[1]], sep = "\\|", extra = "merge")
+colnames(SCN9A_anno)[ncol(SCN9A_anno)] <- "INFO"  # Rename last column as "INFO"
+
+# Replace empty columns with NA
+SCN9A_anno[SCN9A_anno == ""] <- NA
+```
 
