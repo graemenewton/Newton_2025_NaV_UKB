@@ -1,8 +1,5 @@
 UKB_EOP.csv.gz
-UKB_ICD10.csv.gz
-UKB_RxSR.csv.gz
-UKB_RxSR_coded.csv.gz
 UKB_Rx_analgesics.csv.gz
-UKB_Rx_analgesics_counts.csv.gz
 UKB_Rx_unique_drugs.csv.gz
+UKB_PC.csv.gz
 UKB_general.csv.gz
