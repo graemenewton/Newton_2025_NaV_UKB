@@ -54,7 +54,7 @@ rm(new_packages, package_list)
 gc()
 ```
 
-# Load Data and Dictionaries
+## Load Data and Dictionaries
 ```{r}
 # Load UK Biobank coding and data dictionary
 coding <- fread(here("data", "Codings.csv"))
@@ -76,7 +76,7 @@ SCN9A_gcount <- fread(here("data", "SCN9A_counts.txt"))
 
 ```
 
-# Data Preperation
+## Data Preperation
 ```{r}
 # Extract the name of the annotation columns from the metadata
 anno_cols <- str_extract(vcf_metadata[8,], "Allele(.+)")
