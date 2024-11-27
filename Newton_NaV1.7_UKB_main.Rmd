@@ -70,6 +70,7 @@ eop <- fread(here("data", "UKB_EOP.csv.gz"))
 general <- fread(here("data", "UKB_general.csv.gz"))
 rx_analgesics <- fread(here("data", "UKB_Rx_analgesics.csv.gz"))
 pcs <- fread(here("data", "UKB_PC.csv.gz"))
+pcs <- pcs[,-13] # Delete this later as specifc bug in my data download scripts that has been fixed
 ```
 
 ## Prepare Phenotype Data - Analgesic Precriptions
@@ -416,6 +417,14 @@ rm(matched_indices, mutation_group, mutation_list, group_counts)
 
 
 # Logistic Regression Analysis
+
+# Multiple Carriers
+```{r}
+
+```
+
+
+# Just one pheno
 ```{r}
 
 
@@ -476,7 +485,7 @@ coef_df[coef_df$Variable %in% c("(Intercept)", "age", "sex") | grepl("PC", coef_
 ```
 
 
-
+# All phenos loop
 ```{r}
 phenotypes <- c("chronic_pain", "dn4", "NaV_Blocker", "TCA", "Gabapentinoid", "Opioid_strong", "Opioid_dual")
 pheno_name <- c("Chronic Pain", "Neuropathic Pain", "NaV Blocker", "TCA", "Gabapentinoid", "Opioid (strong)", "Opioid (dual)")
@@ -621,6 +630,8 @@ for (mutation in mutations) {
   ggsave(filename = here("output", paste0(mutation,"_glm", ".png")), plot = p, width = 10, height = 10/1.618)
 }
 
+rm(p)
+
 fwrite(glm_data, here("output", "SCN9A_GoF_glm.csv"), sep = ",")
 fwrite(glm_data_plot, here("output", "SCN9A_GoF_glm_mut_only.csv"), sep = ",")
 ```
@@ -641,5 +652,9 @@ OR_summary <- glm_data_plot %>%
 fwrite(OR_summary, here("output", "SCN9A_GoF_glm_OR_summary.csv"), sep = ",")
 ```
 
+
+```{r}
+table(phenos$group)
+```
 
 
