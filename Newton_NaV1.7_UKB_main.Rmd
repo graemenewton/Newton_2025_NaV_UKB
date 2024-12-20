@@ -420,7 +420,77 @@ rm(matched_indices, mutation_group, mutation_list, group_counts)
 
 # Multiple Carriers
 ```{r}
+phenos$group_glm_carrier <- ifelse(phenos$group == "control", "control", "carrier")
+model_carrier <- glm(chronic_pain ~ group_glm_carrier + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = phenos, family = binomial())
+carrier_coef_summary <- summary(model_carrier)$coefficients
+carrier_coef_summary <- as.data.frame(carrier_coef_summary)
+carrier_coef_summary[, "OR"] <- exp(carrier_coef_summary[, "Estimate"])
+carrier_coef_summary[, "L95CI"] <- exp(carrier_coef_summary[, "Estimate"] - 1.96 * carrier_coef_summary[, "Std. Error"])
+carrier_coef_summary[, "U95CI"] <- exp(carrier_coef_summary[, "Estimate"] + 1.96 * carrier_coef_summary[, "Std. Error"])
+carrier_coef_df <- as.data.frame(carrier_coef_summary)
+carrier_coef_df$Variable <- rownames(carrier_coef_df)
+carrier_coef_df$Variable <- gsub("group_glm_carriercontrol", "carrier", carrier_coef_df$Variable)
 
+# Add additional columns: number of carriers, rate of phenotype in carriers, number of controls, rate of phenotype in controls
+carrier_summary <- phenos %>%
+  group_by(group_glm_carrier) %>%
+  summarise(
+    num_carriers = n(),
+    rate_phenotype_carriers = mean(chronic_pain),
+    .groups = 'drop'
+  ) %>%
+  filter(group_glm_carrier != "control")
+
+control_summary <- phenos %>%
+  filter(group_glm_carrier == "control") %>%
+  summarise(
+    num_controls = n(),
+    rate_phenotype_controls = mean(chronic_pain),
+    .groups = 'drop'
+  )
+
+# Join the summary data to the coef_df
+carrier_coef_df <- carrier_coef_df %>%
+  left_join(carrier_summary, by = c("Variable" = "group_glm_carrier")) %>%
+  mutate(num_controls = control_summary$num_controls,
+         rate_phenotype_controls = control_summary$rate_phenotype_controls)
+
+# Define the desired order of variables
+variable_order <- rev(c("(Intercept)", "carrier", "age", "sex", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10"))
+  
+# Convert the Variable column to a factor with the specified levels
+carrier_coef_df$Variable <- factor(carrier_coef_df$Variable, levels = variable_order)
+carrier_coef_df <- carrier_coef_df[order(carrier_coef_df$Variable), ]
+
+# Reorder columns to place Phenotype and Variable first
+carrier_coef_df$Phenotype = "Chronic Pain"
+carrier_coef_df$adjP <- p.adjust(carrier_coef_df$'Pr(>|z|)', method = "fdr")
+carrier_coef_df <- carrier_coef_df[, c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls", setdiff(names(carrier_coef_df), c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls")))]
+rownames(carrier_coef_df) <- NULL
+colnames(carrier_coef_df)[c(3:10,14)] <- c("N_Carriers", "Carriers_Pheno_Rate", "N_Controls", "Controls_Pheno_Rate", "Coef", "SE", "z", "P", "FDR Adj. P")
+carrier_coef_df <- carrier_coef_df[,c(1:10,14,11:13)]
+
+# Create the plot
+p <- ggplot(carrier_coef_df, aes(x = OR, y = Variable)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = L95CI, xmax = U95CI), height = 0.2) +
+  # geom_vline(xintercept = 1, linetype = "dashed", color = "black", size =  1.25) +
+  # annotate("text", x = 0.5, y = 0.7, label = "Less pain", hjust = 1, color = "darkgreen", size = 7) +
+  # annotate("text", x = 5, y = 0.7, label = "More pain", hjust = 1, color = "darkred", size = 7) +
+  scale_x_continuous(limits = c(0.45, 1.55)) +
+  labs(title = "All Mutation Carriers Combined",
+       y = "",
+       x = "Odds Ratio (OR)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 12, color = "black"),
+        axis.text.x = element_text(size = 12, color = "black"),
+        axis.title.x = element_text(size = 16, color = "black"),
+        plot.title = element_text(hjust = 0.5))
+
+print(p)
+# 
+# # Save the plot
+# ggsave(filename = here("output", paste0(mutation,"_glm", ".png")), plot = p, width = 10, height = 10/1.618)
 ```
 
 
@@ -652,9 +722,90 @@ OR_summary <- glm_data_plot %>%
 fwrite(OR_summary, here("output", "SCN9A_GoF_glm_OR_summary.csv"), sep = ",")
 ```
 
-
 ```{r}
 table(phenos$group)
 ```
 
+# Grouped Analysis
+```{r}
+phenotypes <- c("chronic_pain", "dn4", "NaV_Blocker", "TCA", "Gabapentinoid", "Opioid_strong", "Opioid_dual")
+pheno_name <- c("Chronic Pain", "Neuropathic Pain", "NaV Blocker", "TCA", "Gabapentinoid", "Opioid (strong)", "Opioid (dual)")
+grouped_glm_data <- data.frame("Phenotype" = character(),
+                       "Variable" = character(),
+                       "N_Carriers" = numeric(),
+                       "Carriers_Pheno_Rate" = numeric(),
+                       "N_Controls" = numeric(),
+                       "Controls_Pheno_Rate" = numeric(),
+                       "Coef" = numeric(),
+                       "SE" = numeric(),
+                       "z" = numeric(),
+                       "P" = numeric(),
+                       "OR" = numeric(),
+                       "L95CI" = numeric(),
+                       "U95CI" = numeric(),
+                       stringsAsFactors = FALSE)
+
+for (i in seq_along(phenotypes)) {
+  # Fit the logistic regression model
+  model <- glm(as.formula(paste(phenotypes[i], "~ group_glm + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10")), data = phenos, family = binomial())
+  coef_summary <- summary(model)$coefficients
+  coef_summary <- as.data.frame(coef_summary)
+  coef_summary[, "OR"] <- exp(coef_summary[, "Estimate"])
+  coef_summary[, "L95CI"] <- exp(coef_summary[, "Estimate"] - 1.96 * coef_summary[, "Std. Error"])
+  coef_summary[, "U95CI"] <- exp(coef_summary[, "Estimate"] + 1.96 * coef_summary[, "Std. Error"])
+  coef_df <- as.data.frame(coef_summary)
+  coef_df$Variable <- rownames(coef_df)
+  coef_df$Variable <- gsub("group_glm", "", coef_df$Variable)
+  
+  # Define the desired order of variables
+variable_order <- c("(Intercept)", "R185H", "I228M", "P610T", "G616R",
+                    "K655R", "W719C", "I720K", "I739V", "V810M", "L1267V", "W1538R",
+                    "age", "sex", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10")
+  
+  # Convert the Variable column to a factor with the specified levels
+  coef_df$Variable <- factor(coef_df$Variable, levels = variable_order)
+  coef_df <- coef_df[order(coef_df$Variable), ]
+  
+  # Add the Phenotype column
+  coef_df$Phenotype <- pheno_name[i]
+  
+  # Add additional columns: number of carriers, rate of phenotype in carriers, number of controls, rate of phenotype in controls
+  phenos_summary <- phenos %>%
+    filter(!is.na(get(phenotypes[i]))) %>%
+    group_by(group_glm) %>%
+    summarise(
+      num_carriers = n(),
+      rate_phenotype_carriers = mean(get(phenotypes[i]), na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    filter(group_glm != "control")
+  
+  control_summary <- phenos %>%
+    filter(group_glm == "control" & !is.na(get(phenotypes[i]))) %>%
+    summarise(
+      num_controls = n(),
+      rate_phenotype_controls = mean(get(phenotypes[i]), na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  # Join the summary data to the coef_df
+  coef_df <- coef_df %>%
+    left_join(phenos_summary, by = c("Variable" = "group_glm")) %>%
+    mutate(num_controls = control_summary$num_controls,
+           rate_phenotype_controls = control_summary$rate_phenotype_controls)
+  
+  # Reorder columns to place Phenotype and Variable first
+  coef_df <- coef_df[, c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls", setdiff(names(coef_df), c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls")))]
+  rownames(coef_df) <- NULL
+  colnames(coef_df)[3:10] <- c("N_Carriers", "Carriers_Pheno_Rate", "N_Controls", "Controls_Pheno_Rate", "Coef", "SE", "z", "P")
+  
+  # Set columns 3 to 6 to NA for specific variables
+  coef_df[coef_df$Variable %in% c("(Intercept)", "age", "sex") | grepl("PC", coef_df$Variable), 3:6] <- NA
+
+  # Append the results to glm_data
+  glm_data <- rbind(glm_data, coef_df)
+}
+
+rm(phenotypes, pheno_name, phenos_summary, variable_order, control_summary, coef_summary, coef_df, model)
+```
 
