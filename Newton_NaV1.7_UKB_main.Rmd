@@ -493,6 +493,30 @@ print(p)
 # ggsave(filename = here("output", paste0(mutation,"_glm", ".png")), plot = p, width = 10, height = 10/1.618)
 ```
 
+# Just the rare mutations <50
+```{r}
+phenos$group_rare_mutations <- ifelse(phenos$mutation %in% c('N641Y','P187L','R996C','M1532I','Q10R'), "rare", "exclude")
+phenos$group_rare_mutations[which(phenos$group == "control")] <- "control"
+phenos$group_rare_mutations[which(phenos$n_mutations > 1)] <- NA
+phenos$group_rare_mutations[which(phenos$group_rare_mutations == "exclude")] <- NA
+
+# Assuming model is already fitted and summary is obtained
+model <- glm(chronic_pain ~ group_rare_mutations + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = phenos, family = binomial())
+coef_summary <- summary(model)$coefficients
+coef_summary <- as.data.frame(coef_summary)
+coef_summary[, "OR"] <- exp(coef_summary[, "Estimate"])
+coef_summary[, "L95CI"] <- exp(coef_summary[, "Estimate"] - 1.96 * coef_summary[, "Std. Error"])
+coef_summary[, "U95CI"] <- exp(coef_summary[, "Estimate"] + 1.96 * coef_summary[, "Std. Error"])
+coef_df <- as.data.frame(coef_summary)
+coef_df$Variable <- rownames(coef_df)
+
+```
+
+#
+```{r}
+mut_count <- data.frame(table(phenos$mutation))
+```
+
 
 # Just one pheno
 ```{r}
@@ -807,5 +831,11 @@ variable_order <- c("(Intercept)", "R185H", "I228M", "P610T", "G616R",
 }
 
 rm(phenotypes, pheno_name, phenos_summary, variable_order, control_summary, coef_summary, coef_df, model)
+```
+
+
+## Topology Plot
+```{r}
+topol_df <- table(mut$topology[which(mut$UKB_het < 50)])
 ```
 
