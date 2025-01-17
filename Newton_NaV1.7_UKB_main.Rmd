@@ -1,0 +1,841 @@
+---
+title: "Newton_NaV1.7_UKB_main"
+author: "Graeme Newton"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Analysis of SCN9A/NaV1.7 Channelopathy Variant Carriers
+This document contains the code to reproduce the analysis of Newton et al. 2024.
+
+Note that the data must be downloaded from DNAnexus and copied into the /data folder of this repository. The code to generate all the data required for this analysis is in the /DNAnexus_scripts folder. Note that a spark cluster instance must be used to download the data. The computational requirements to download some of the phenotype data, particularly the prescription data, are quite large. Please use a suitably powerful compute instance. If there are errors downloading the phenotype data from DNAnexus, this is most likely due to the instance not having enough RAM.
+
+The requirements to run this code locally are minimum of 16GB RAM - this is due to the size of the data files that must be loaded. The code has been written in a way so that if this repository is cloned, and the working directory is set to ~/Newton_NaV1.7_UKB, the the code will run without any changes required to the file path names.
+
+```{r install_packages, warnings = FALSE, messages = FALSE}
+# List the packages to install
+package_list <- c(
+  "here",
+  "data.table",
+  "R.utils",
+  "readxl",
+  "dplyr",
+  "tidyr",
+  "purrr",
+  "tictoc", #remove later
+  "ggplot2"
+  # "stringr",
+  # "tibble",
+  # "R.utils",
+  # "remotes",
+  # "devtools",
+  # "clipr",
+  # "shiny",
+  # "reshape2",
+  # "plotly",
+  # "heatmaply",
+  # "R.utils",
+  # "tictoc",
+  # "ggplot2"
+)
+
+# Install them
+new_packages <-
+  package_list[!(package_list %in% installed.packages()[, "Package"])]
+if (length(new_packages)) {
+  install.packages(new_packages)
+}
+eval(parse(text = paste0("library(", package_list, ")")))
+
+# Return message to user and clean up
+cat("Packages installed: \n", sprintf("%s\n", package_list))
+rm(new_packages, package_list)
+gc()
+```
+
+# Phenotype Data Preperation
+## Load Phenotype Data and Dictionaries
+```{r}
+# Load UK Biobank coding and data dictionary
+coding <- fread(here("data", "UKB_Codings.csv.gz"))
+dict <- fread(here("data", "UKB_Data_Dictionary.csv.gz"))
+
+# Load phenotype data
+eop <- fread(here("data", "UKB_EOP.csv.gz"))
+general <- fread(here("data", "UKB_general.csv.gz"))
+rx_analgesics <- fread(here("data", "UKB_Rx_analgesics.csv.gz"))
+pcs <- fread(here("data", "UKB_PC.csv.gz"))
+pcs <- pcs[,-13] # Delete this later as specifc bug in my data download scripts that has been fixed
+```
+
+## Prepare Phenotype Data - Analgesic Precriptions
+```{r}
+rx_analgesics$drug_type <- case_when(
+  grepl("ibuprofen|naproxen|diclofenac|celecoxib|mefenamic acid|etoricoxib|indomethacin", rx_analgesics$drug_name, ignore.case = TRUE) ~ "NSAID",
+  grepl("aspirin", rx_analgesics$drug_name, ignore.case = TRUE) ~ "Aspirin",
+  grepl("paracetamol", rx_analgesics$drug_name, ignore.case = TRUE) ~ "Paracetamol",
+  grepl("codeine|codamol", rx_analgesics$drug_name, ignore.case = TRUE) ~ "Opioid_weak",
+  grepl("tramadol|tapentadol", rx_analgesics$drug_name, ignore.case = TRUE) ~ "Opioid_dual",
+  grepl("diamorphine|morphine|methadone|fentanyl|buprenorphine|oxycodone|hydromorphone|oramorph", rx_analgesics$drug_name, ignore.case = TRUE) ~ "Opioid_strong",
+  grepl("gabapentin|pregabalin", rx_analgesics$drug_name, ignore.case = TRUE) ~ "Gabapentinoid",
+  grepl("amitriptyline|nortriptyline|protriptyline|desipramine", rx_analgesics$drug_name, ignore.case = TRUE) ~ "TCA",
+  grepl("mexiletine|lacosamide|carbamazepine|oxcarbazepine|phenytoin|sodium valproate|lamotrigine", rx_analgesics$drug_name, ignore.case = TRUE) ~ "NaV_Blocker",
+  grepl("duloxetine|mirtazapine|venlafaxine", rx_analgesics$drug_name, ignore.case = TRUE) ~ "SNRI",
+  TRUE ~ "Other"
+)
+
+rx_analgesics$drug_type <- as.factor(rx_analgesics$drug_type)
+rx_analgesics <- rx_analgesics %>%
+  group_by(eid, drug_type) %>%
+  summarize(count = n()) %>%
+    pivot_wider(names_from = drug_type, values_from = count, values_fill = 0)
+```
+## Prepare Phenotype Data - DN4
+```{r}
+eop_dn4 <- eop[, 47:53]
+eop_dn4[eop_dn4 == -818] <- NA
+eop_dn4[eop_dn4 == -121] <- NA
+dn4 <- list()
+dn4$eid <- eop$eid
+dn4$dn4 <- rowSums(eop_dn4)
+dn4 <- as.data.frame(dn4)
+dn4 <- dn4[!is.na(dn4$dn4),]
+```
+
+
+## Prepare Phenotype Data - General (Recruitment Questionnaire)
+```{r}
+# Extract Chronic Pain Phenotype - Any pain > 3mths but not across full body
+chronic_pain <- general[,c(1,2,6:13)]
+chronic_pain[chronic_pain == -1] <- NA
+chronic_pain[chronic_pain == -3] <- NA
+chronic_pain$chronic_pain <- ifelse((rowSums(chronic_pain[, 3:10] == 1, na.rm = TRUE) > 0) == TRUE, 1, 0)
+chronic_pain$chronic_pain[which((rowSums(ifelse(is.na(chronic_pain[, 3:10]) == TRUE, 1, 0)) == 8) == TRUE)] <- NA
+chronic_pain <- chronic_pain[ ,c("eid", "chronic_pain")]
+chronic_pain$chronic_pain[which(is.na(chronic_pain$chronic_pain))] <- 0
+
+# Extract age and sex
+# p21022 = age at recruitment, p31 = sex
+age <- general[,c("eid", "p21022")]
+colnames(age)[2] <- "age"
+sex <- general[,c("eid", "p31")]
+colnames(sex)[2] <- "sex"
+```
+
+
+## Prepare Phenotype Data - Genetic Principal Components
+```{r}
+# Rename PC columns
+colnames(pcs)[2:21] <- paste0("PC", 1:20)
+```
+
+
+## Prepare Phenotype Data -  Merge Datasets
+```{r}
+df_list <- list(age, sex, chronic_pain, dn4, rx_analgesics, pcs)
+
+# Merge all data frames together by eid
+phenos <- df_list %>% reduce(full_join, by='eid')
+
+# Binarise Prescription Data
+phenos[ ,6:16][phenos[ ,6:16] >= 1] <- 1
+
+# Binarise DN4 data - DN4 >= 3 is NeuP based on Baskozos et al., 2023
+phenos$dn4 <- ifelse(phenos$dn4 >= 3, 1, ifelse(phenos$dn4 < 3, 0, NA))
+
+rm(age, chronic_pain, df_list, dn4, eop, eop_dn4, general, pcs, rx_analgesics, sex)
+```
+
+
+# Genotype Data Preperation
+
+# Function for reading in vcf files quickly
+```{r}
+fread_vcf <- function(vcf_file,
+                      chunksize = 1000,
+                      verbose = FALSE) {
+  vcf_chunk_list <- list()  # List to store the VCF data frames
+  chunk_count <-
+    0  # Variable to keep track of the number of chunks read
+
+  while (TRUE) {
+    if (verbose == TRUE) {
+      cat("\n", "Reading chunk ", chunk_count + 1)
+    }
+    skip <- chunksize * chunk_count
+    vcf <-
+      fread(vcf_file,
+            verbose = verbose,
+            nrows = chunksize,
+            skip = skip)
+
+    if (nrow(vcf) == 0) {
+      break  # Exit the loop if no more rows are read
+    }
+    vcf_chunk_list[[chunk_count + 1]] <-
+      vcf  # Append the current chunk to the list
+    chunk_count <- chunk_count + 1  # Increment the chunk count
+
+    if (nrow(vcf) < chunksize) {
+      break  # Exit the loop if the last chunk didn't fill the specified rows
+      if (verbose == TRUE) {
+        cat("\n", "Finished.", "\n")
+      }
+    }
+  }
+  output <-
+    rbindlist(vcf_chunk_list, use.names = FALSE, fill = FALSE)
+  rm(vcf_chunk_list)
+  return(output)
+}
+
+delim_vcf_anno <- function(x, column, n_columns, delim, cols = NULL) {
+  # Check if cols is provided, otherwise generate default column names
+  if (is.null(cols)) {
+    cols <- paste0("col", 1:n_columns)
+  }
+  
+  # Handle escape characters for delimiter
+  delim <- c("\\", delim)
+  
+  # Use the separate function to split the column
+  output <- x %>% separate(column, into = cols, sep = paste(delim, collapse = ""))
+  
+  return(output)
+}
+```
+
+# RUN THIS SECTION ONCE
+## Unzip annotated vcf file - RUN ONCE ONLY
+```{bash}
+cd data
+gunzip -k -f SCN9A_gene_anno.vcf.gz
+cd ..
+```
+
+## Load Genotype Data - MINIMUM 16GB RAM - RUN ONCE ONLY
+```{r}
+# Load genotype data
+vcf <- fread_vcf("C:/Users/bi19884/OneDrive - University of Bristol/Documents/Coding/R/Newton_NaV1.7_UKB/data/SCN9A_gene_anno.vcf", chunksize = 500)
+anno <- fread("C:/Users/bi19884/OneDrive - University of Bristol/Documents/Coding/R/Newton_NaV1.7_UKB/data/SCN9A_gene_anno.vcf", nrows = 8, header = FALSE, fill = TRUE)
+gcount <- fread(here("data", "SCN9A_gene.gcount"))
+
+# Split the annotation columns and extract the column headers from the vcf metadata
+anno <- anno$V1[8]
+anno <- sub(".*Format: ", "", anno)
+anno <- sub("\">", "", anno)
+anno_cols <- strsplit(anno, "\\|")[[1]]
+vcf <- delim_vcf_anno(vcf, 'INFO', n_columns = 78, delim = '|')
+colnames(vcf)[8:85] <- anno_cols
+
+vcf <- merge(vcf, gcount, by = c("#CHROM", "ID", "REF", "ALT"))
+vcf_colnames <- colnames(vcf)
+new_order <- c(vcf_colnames[1:7], vcf_colnames[(ncol(vcf)-6):ncol(vcf)], vcf_colnames[8:(ncol(vcf)-6)])
+vcf <- vcf[,new_order]
+saveRDS(vcf, here("data", "vcf_processed.rds"))
+
+mut <- read_xlsx(here("data", "Mutation_Table.xlsx"))
+vcf_mut <- vcf[vcf$ID %in% mut$ID, ]
+saveRDS(vcf_mut, here("data", "vcf_mut.rds"))
+gc()
+```
+
+# Load VCF Data
+
+# Load in the vcf that has already been processed
+```{r}
+mut <- read_xlsx(here("data", "Mutation_Table.xlsx"))
+# Select rows from IEM_in_UKB based on protein positions
+vcf_mut <- readRDS(here("data", "vcf_mut.rds"))
+colnames(vcf_mut)[94:ncol(vcf_mut)] <- sub(".*_", "", colnames(vcf_mut)[94:ncol(vcf_mut)])
+```
+
+
+# Extract the carriers 
+```{r}
+extract_participants <- function(x, column, targets, pattern) {
+  targets <- paste0(targets, "|", collapse = "")
+  targets <- substr(targets, 1, nchar(targets) - 1)
+  x <- x[grep(targets, x[[column]]), ]
+  # a <- length(x)
+  output <- rownames(data.frame(grep(pattern, x, value = TRUE)))
+  # b <- length(output)
+  # cat(paste("\n", b, "participants matched.", "\n", (a - b),
+  #           "participants removed."))
+  return(output)
+}
+
+carriers <- list()
+carriers$names <- NA
+carriers$het <- NA
+carriers$hom <- NA
+
+vcf_sub <- vcf_mut[,c(2,94:ncol(vcf_mut))]
+
+for (i in 1:length(mut$ID)){
+  
+  carriers$names[i] <- mut$SCN9A_1_protein_notation[i]
+  carriers$het[i] <- list(extract_participants(vcf_sub, 1, mut$ID[i], "\\b0/1\\b"))
+  carriers$hom[i] <- list(extract_participants(vcf_sub, 1, mut$ID[i], "\\b1/1\\b"))
+  
+}
+
+rm(vcf_sub)
+
+for (i in 1:length(carriers$names)){
+  carriers$both[i] <- list(c(unlist(carriers$het[i]), unlist(carriers$hom[i])))
+}
+
+# Combine the two variants that cause W719C
+carriers$het[20] <- list(c(unlist(carriers$het[19]), unlist(carriers$het[20])))
+carriers$hom[20] <- list(c(unlist(carriers$hom[19]), unlist(carriers$hom[20])))
+carriers$both[20] <- list(c(unlist(carriers$both[19]), unlist(carriers$both[20])))
+carriers$names <- carriers$names[-19]
+carriers$het <- carriers$het[-19]
+carriers$hom <- carriers$hom[-19]
+carriers$both <- carriers$both[-19]
+
+
+# Remove R1150W mutation as so common 
+carriers$names <- carriers$names[-37]
+carriers$het <- carriers$het[-37]
+carriers$hom <- carriers$hom[-37]
+carriers$both <- carriers$both[-37]
+
+```
+
+# Rename mutations to shorthand
+```{r}
+# Define a conversion function from three-letter to one-letter amino acid codes
+convert_to_one_letter <- function(amino_acid_change) {
+  # Create a named vector for conversion
+  aa_conversion <- c(
+    Ala = "A", Arg = "R", Asn = "N", Asp = "D", Cys = "C",
+    Gln = "Q", Glu = "E", Gly = "G", His = "H", Ile = "I",
+    Leu = "L", Lys = "K", Met = "M", Phe = "F", Pro = "P",
+    Ser = "S", Thr = "T", Trp = "W", Tyr = "Y", Val = "V"
+  )
+  
+  # Remove the "p." prefix
+  stripped_change <- sub("p\\.", "", amino_acid_change)
+  
+  # Check for deletion mutation
+  if (grepl("del$", stripped_change)) {
+    # Handle deletion case
+    original_aa <- substr(stripped_change, 1, 3)
+    position <- gsub("[^0-9]", "", stripped_change)
+    new_aa_one_letter <- "del"
+    
+    # Check if the original amino acid is in the conversion table
+    if (!(original_aa %in% names(aa_conversion))) {
+      stop(paste("Original amino acid", original_aa, "not found in conversion table."))
+    }
+    
+    # Convert to one-letter code
+    original_aa_one_letter <- aa_conversion[[original_aa]]
+    
+    # Construct the one-letter code change for deletion
+    one_letter_change <- paste0(original_aa_one_letter, position, new_aa_one_letter)
+    
+  } else {
+    # Handle standard mutation case
+    original_aa <- substr(stripped_change, 1, 3)
+    position <- gsub("[^0-9]", "", stripped_change)
+    new_aa <- substr(stripped_change, nchar(stripped_change) - 2, nchar(stripped_change))
+    
+    # Check if the original and new amino acids are in the conversion table
+    if (!(original_aa %in% names(aa_conversion))) {
+      stop(paste("Original amino acid", original_aa, "not found in conversion table."))
+    }
+    if (!(new_aa %in% names(aa_conversion))) {
+      stop(paste("New amino acid", new_aa, "not found in conversion table."))
+    }
+    
+    # Convert to one-letter codes
+    original_aa_one_letter <- aa_conversion[[original_aa]]
+    new_aa_one_letter <- aa_conversion[[new_aa]]
+    
+    # Construct the one-letter code change
+    one_letter_change <- paste0(original_aa_one_letter, position, new_aa_one_letter)
+  }
+  
+  return(one_letter_change)
+}
+
+carriers$names <- unname(sapply(carriers$names, convert_to_one_letter))
+```
+
+
+```{r}
+
+# Create an empty column for mutations
+phenos$mutation <- NA
+
+# Initialize a list to hold mutations corresponding to each eid
+mutation_list <- vector("list", length = nrow(phenos))
+
+# Loop through each set of mutations
+for (i in 1:length(carriers$both)) {
+  mutation_group <- carriers$both[[i]]
+  matched_indices <- match(mutation_group, phenos$eid)
+  matched_indices <- na.omit(matched_indices)
+  mutation_list[matched_indices] <- lapply(mutation_list[matched_indices], c, carriers$names[i])
+}
+
+# Convert the list of mutations into a string for each eid
+phenos$mutation <- sapply(mutation_list, function(x) {
+  if(length(x) > 0) {
+    paste(unique(x), collapse = ", ")
+  } else {
+    NA
+  }
+})
+
+
+# Assign groups for logistic regression
+phenos$n_mutations <- sapply(strsplit(as.character(phenos$mutation), ","), length)
+phenos$n_mutations[which(is.na(phenos$mutation))] <- 0
+
+phenos$group <- phenos$mutation
+phenos$group[is.na(phenos$group)] <- "control"
+
+phenos$group_glm <- ifelse(phenos$group == "control", "control",
+                           ifelse(phenos$n_mutations >= 2, NA,
+                                  ifelse(phenos$n_mutations == 1, phenos$group, "UNMATCHED")))
+
+group_counts <- table(phenos$group_glm)
+phenos$group_glm <- ifelse(group_counts[phenos$group_glm] < 50, NA, phenos$group_glm)
+
+rm(matched_indices, mutation_group, mutation_list, group_counts)
+```
+
+
+
+# Logistic Regression Analysis
+
+# Multiple Carriers
+```{r}
+phenos$group_glm_carrier <- ifelse(phenos$group == "control", "control", "carrier")
+model_carrier <- glm(chronic_pain ~ group_glm_carrier + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = phenos, family = binomial())
+carrier_coef_summary <- summary(model_carrier)$coefficients
+carrier_coef_summary <- as.data.frame(carrier_coef_summary)
+carrier_coef_summary[, "OR"] <- exp(carrier_coef_summary[, "Estimate"])
+carrier_coef_summary[, "L95CI"] <- exp(carrier_coef_summary[, "Estimate"] - 1.96 * carrier_coef_summary[, "Std. Error"])
+carrier_coef_summary[, "U95CI"] <- exp(carrier_coef_summary[, "Estimate"] + 1.96 * carrier_coef_summary[, "Std. Error"])
+carrier_coef_df <- as.data.frame(carrier_coef_summary)
+carrier_coef_df$Variable <- rownames(carrier_coef_df)
+carrier_coef_df$Variable <- gsub("group_glm_carriercontrol", "carrier", carrier_coef_df$Variable)
+
+# Add additional columns: number of carriers, rate of phenotype in carriers, number of controls, rate of phenotype in controls
+carrier_summary <- phenos %>%
+  group_by(group_glm_carrier) %>%
+  summarise(
+    num_carriers = n(),
+    rate_phenotype_carriers = mean(chronic_pain),
+    .groups = 'drop'
+  ) %>%
+  filter(group_glm_carrier != "control")
+
+control_summary <- phenos %>%
+  filter(group_glm_carrier == "control") %>%
+  summarise(
+    num_controls = n(),
+    rate_phenotype_controls = mean(chronic_pain),
+    .groups = 'drop'
+  )
+
+# Join the summary data to the coef_df
+carrier_coef_df <- carrier_coef_df %>%
+  left_join(carrier_summary, by = c("Variable" = "group_glm_carrier")) %>%
+  mutate(num_controls = control_summary$num_controls,
+         rate_phenotype_controls = control_summary$rate_phenotype_controls)
+
+# Define the desired order of variables
+variable_order <- rev(c("(Intercept)", "carrier", "age", "sex", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10"))
+  
+# Convert the Variable column to a factor with the specified levels
+carrier_coef_df$Variable <- factor(carrier_coef_df$Variable, levels = variable_order)
+carrier_coef_df <- carrier_coef_df[order(carrier_coef_df$Variable), ]
+
+# Reorder columns to place Phenotype and Variable first
+carrier_coef_df$Phenotype = "Chronic Pain"
+carrier_coef_df$adjP <- p.adjust(carrier_coef_df$'Pr(>|z|)', method = "fdr")
+carrier_coef_df <- carrier_coef_df[, c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls", setdiff(names(carrier_coef_df), c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls")))]
+rownames(carrier_coef_df) <- NULL
+colnames(carrier_coef_df)[c(3:10,14)] <- c("N_Carriers", "Carriers_Pheno_Rate", "N_Controls", "Controls_Pheno_Rate", "Coef", "SE", "z", "P", "FDR Adj. P")
+carrier_coef_df <- carrier_coef_df[,c(1:10,14,11:13)]
+
+# Create the plot
+p <- ggplot(carrier_coef_df, aes(x = OR, y = Variable)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = L95CI, xmax = U95CI), height = 0.2) +
+  # geom_vline(xintercept = 1, linetype = "dashed", color = "black", size =  1.25) +
+  # annotate("text", x = 0.5, y = 0.7, label = "Less pain", hjust = 1, color = "darkgreen", size = 7) +
+  # annotate("text", x = 5, y = 0.7, label = "More pain", hjust = 1, color = "darkred", size = 7) +
+  scale_x_continuous(limits = c(0.45, 1.55)) +
+  labs(title = "All Mutation Carriers Combined",
+       y = "",
+       x = "Odds Ratio (OR)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 12, color = "black"),
+        axis.text.x = element_text(size = 12, color = "black"),
+        axis.title.x = element_text(size = 16, color = "black"),
+        plot.title = element_text(hjust = 0.5))
+
+print(p)
+# 
+# # Save the plot
+# ggsave(filename = here("output", paste0(mutation,"_glm", ".png")), plot = p, width = 10, height = 10/1.618)
+```
+
+# Just the rare mutations <50
+```{r}
+phenos$group_rare_mutations <- ifelse(phenos$mutation %in% c('N641Y','P187L','R996C','M1532I','Q10R'), "rare", "exclude")
+phenos$group_rare_mutations[which(phenos$group == "control")] <- "control"
+phenos$group_rare_mutations[which(phenos$n_mutations > 1)] <- NA
+phenos$group_rare_mutations[which(phenos$group_rare_mutations == "exclude")] <- NA
+
+# Assuming model is already fitted and summary is obtained
+model <- glm(chronic_pain ~ group_rare_mutations + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = phenos, family = binomial())
+coef_summary <- summary(model)$coefficients
+coef_summary <- as.data.frame(coef_summary)
+coef_summary[, "OR"] <- exp(coef_summary[, "Estimate"])
+coef_summary[, "L95CI"] <- exp(coef_summary[, "Estimate"] - 1.96 * coef_summary[, "Std. Error"])
+coef_summary[, "U95CI"] <- exp(coef_summary[, "Estimate"] + 1.96 * coef_summary[, "Std. Error"])
+coef_df <- as.data.frame(coef_summary)
+coef_df$Variable <- rownames(coef_df)
+
+```
+
+#
+```{r}
+mut_count <- data.frame(table(phenos$mutation))
+```
+
+
+# Just one pheno
+```{r}
+
+
+# Assuming model is already fitted and summary is obtained
+model <- glm(chronic_pain ~ group_glm + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = phenos, family = binomial())
+coef_summary <- summary(model)$coefficients
+coef_summary <- as.data.frame(coef_summary)
+coef_summary[, "OR"] <- exp(coef_summary[, "Estimate"])
+coef_summary[, "L95CI"] <- exp(coef_summary[, "Estimate"] - 1.96 * coef_summary[, "Std. Error"])
+coef_summary[, "U95CI"] <- exp(coef_summary[, "Estimate"] + 1.96 * coef_summary[, "Std. Error"])
+coef_df <- as.data.frame(coef_summary)
+coef_df$Variable <- rownames(coef_df)
+coef_df$Variable <- gsub("group_glm", "", coef_df$Variable)
+
+# Define the desired order of variables
+variable_order <- c("(Intercept)", "R185H", "I228M", "P610T", "G616R",
+                    "K655R", "W719C", "I720K", "I739V", "V810M", "L1267V", "W1538R",
+                    "age", "sex", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10")
+
+# Convert the Variable column to a factor with the specified levels
+coef_df$Variable <- factor(coef_df$Variable, levels = variable_order)
+coef_df <- coef_df[order(coef_df$Variable), ]
+
+# Add the Phenotype column
+coef_df$Phenotype <- "Chronic Pain"
+
+# Add additional columns: number of carriers, rate of phenotype in carriers, number of controls, rate of phenotype in controls
+phenos_summary <- phenos %>%
+  group_by(group_glm) %>%
+  summarise(
+    num_carriers = n(),
+    rate_phenotype_carriers = mean(chronic_pain),
+    .groups = 'drop'
+  ) %>%
+  filter(group_glm != "control")
+
+control_summary <- phenos %>%
+  filter(group_glm == "control") %>%
+  summarise(
+    num_controls = n(),
+    rate_phenotype_controls = mean(chronic_pain),
+    .groups = 'drop'
+  )
+
+# Join the summary data to the coef_df
+coef_df <- coef_df %>%
+  left_join(phenos_summary, by = c("Variable" = "group_glm")) %>%
+  mutate(num_controls = control_summary$num_controls,
+         rate_phenotype_controls = control_summary$rate_phenotype_controls)
+
+# Reorder columns to place Phenotype and Variable first
+coef_df <- coef_df[, c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls", setdiff(names(coef_df), c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls")))]
+rownames(coef_df) <- NULL
+colnames(coef_df)[3:10] <- c("N_Carriers", "Carriers_Pheno_Rate", "N_Controls", "Controls_Pheno_Rate", "Coef", "SE", "z", "P")
+
+# Set columns 3 to 5 to NA for specific variables
+coef_df[coef_df$Variable %in% c("(Intercept)", "age", "sex") | grepl("PC", coef_df$Variable), 3:6] <- NA
+```
+
+
+# All phenos loop
+```{r}
+phenotypes <- c("chronic_pain", "dn4", "NaV_Blocker", "TCA", "Gabapentinoid", "Opioid_strong", "Opioid_dual")
+pheno_name <- c("Chronic Pain", "Neuropathic Pain", "NaV Blocker", "TCA", "Gabapentinoid", "Opioid (strong)", "Opioid (dual)")
+glm_data <- data.frame("Phenotype" = character(),
+                       "Variable" = character(),
+                       "N_Carriers" = numeric(),
+                       "Carriers_Pheno_Rate" = numeric(),
+                       "N_Controls" = numeric(),
+                       "Controls_Pheno_Rate" = numeric(),
+                       "Coef" = numeric(),
+                       "SE" = numeric(),
+                       "z" = numeric(),
+                       "P" = numeric(),
+                       "OR" = numeric(),
+                       "L95CI" = numeric(),
+                       "U95CI" = numeric(),
+                       stringsAsFactors = FALSE)
+
+for (i in seq_along(phenotypes)) {
+  # Fit the logistic regression model
+  model <- glm(as.formula(paste(phenotypes[i], "~ group_glm + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10")), data = phenos, family = binomial())
+  coef_summary <- summary(model)$coefficients
+  coef_summary <- as.data.frame(coef_summary)
+  coef_summary[, "OR"] <- exp(coef_summary[, "Estimate"])
+  coef_summary[, "L95CI"] <- exp(coef_summary[, "Estimate"] - 1.96 * coef_summary[, "Std. Error"])
+  coef_summary[, "U95CI"] <- exp(coef_summary[, "Estimate"] + 1.96 * coef_summary[, "Std. Error"])
+  coef_df <- as.data.frame(coef_summary)
+  coef_df$Variable <- rownames(coef_df)
+  coef_df$Variable <- gsub("group_glm", "", coef_df$Variable)
+  
+  # Define the desired order of variables
+variable_order <- c("(Intercept)", "R185H", "I228M", "P610T", "G616R",
+                    "K655R", "W719C", "I720K", "I739V", "V810M", "L1267V", "W1538R",
+                    "age", "sex", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10")
+  
+  # Convert the Variable column to a factor with the specified levels
+  coef_df$Variable <- factor(coef_df$Variable, levels = variable_order)
+  coef_df <- coef_df[order(coef_df$Variable), ]
+  
+  # Add the Phenotype column
+  coef_df$Phenotype <- pheno_name[i]
+  
+  # Add additional columns: number of carriers, rate of phenotype in carriers, number of controls, rate of phenotype in controls
+  phenos_summary <- phenos %>%
+    filter(!is.na(get(phenotypes[i]))) %>%
+    group_by(group_glm) %>%
+    summarise(
+      num_carriers = n(),
+      rate_phenotype_carriers = mean(get(phenotypes[i]), na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    filter(group_glm != "control")
+  
+  control_summary <- phenos %>%
+    filter(group_glm == "control" & !is.na(get(phenotypes[i]))) %>%
+    summarise(
+      num_controls = n(),
+      rate_phenotype_controls = mean(get(phenotypes[i]), na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  # Join the summary data to the coef_df
+  coef_df <- coef_df %>%
+    left_join(phenos_summary, by = c("Variable" = "group_glm")) %>%
+    mutate(num_controls = control_summary$num_controls,
+           rate_phenotype_controls = control_summary$rate_phenotype_controls)
+  
+  # Reorder columns to place Phenotype and Variable first
+  coef_df <- coef_df[, c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls", setdiff(names(coef_df), c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls")))]
+  rownames(coef_df) <- NULL
+  colnames(coef_df)[3:10] <- c("N_Carriers", "Carriers_Pheno_Rate", "N_Controls", "Controls_Pheno_Rate", "Coef", "SE", "z", "P")
+  
+  # Set columns 3 to 6 to NA for specific variables
+  coef_df[coef_df$Variable %in% c("(Intercept)", "age", "sex") | grepl("PC", coef_df$Variable), 3:6] <- NA
+
+  # Append the results to glm_data
+  glm_data <- rbind(glm_data, coef_df)
+}
+
+rm(phenotypes, pheno_name, phenos_summary, variable_order, control_summary, coef_summary, coef_df, model)
+```
+
+
+Adjust P values for multiple comparisons
+```{r}
+tmp <- glm_data[glm_data$Variable %in% c("R185H", "I228M", "P610T", "G616R", "K655R", "W719C", "I720K", "I739V", "V810M", "L1267V", "W1538R"), c(1,2,10)]
+tmp$'P FDR Adj.' <- p.adjust(tmp$P, method = "fdr")
+tmp <- tmp[, -3]
+glm_data$order <- 1:nrow(glm_data)
+
+# Merge `tmp` into `glm_data` by Phenotype, Variable, and P
+glm_data <- merge(glm_data, tmp, by = c("Phenotype", "Variable"), all.x = TRUE)
+
+# Identify the current columns in `glm_data`
+cols <- colnames(glm_data)
+
+# Reorder columns to move 'P Adj.' after column 10
+# Assuming column 10 in `glm_data` is the 'P' column
+glm_data <- glm_data[, c(cols[1:10], "P FDR Adj.", cols[11:(length(cols)-1)])]
+
+glm_data <- glm_data[order(glm_data$order),]
+glm_data <- glm_data[,-15]
+rownames(glm_data) <- NULL
+rm(tmp, cols)
+```
+
+Generate plots
+```{r}
+glm_data_plot <- glm_data[which(glm_data$Variable %in% c("R185H", "I228M", "P610T", 
+                                "G616R", "K655R", "W719C", "I720K", "I739V",
+                                "V810M", "L1267V", "W1538R")),]
+
+mutations <- unique(glm_data_plot$Variable)
+
+for (mutation in mutations) {
+  # print(mutation)
+  
+  # Filter data for the current mutation
+  plot_data <- glm_data_plot[glm_data_plot$Variable == mutation, ]
+  plot_data$Phenotype <- factor(plot_data$Phenotype, levels = rev(c("Chronic Pain", "Neuropathic Pain", "NaV Blocker", "Gabapentinoid", "TCA", "Opioid (strong)", "Opioid (dual)")))
+  
+  # Create the plot
+  p <- ggplot(plot_data, aes(x = OR, y = Phenotype)) +
+    geom_point(size = 3) +
+    geom_errorbarh(aes(xmin = L95CI, xmax = U95CI), height = 0.2) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "black", size =  1.25) +
+    annotate("text", x = 0.5, y = 0.7, label = "Less pain", hjust = 1, color = "darkgreen", size = 7) +
+    annotate("text", x = 5, y = 0.7, label = "More pain", hjust = 1, color = "darkred", size = 7) +
+    scale_x_continuous(trans = "log10", limits = c(0.1, 10)) +
+    labs(title = paste(mutation),
+         y = "",
+         x = "Odds Ratio (OR)") +
+    theme_bw() +
+    theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 12, color = "black"),
+          axis.text.x = element_text(size = 12, color = "black"),
+          axis.title.x = element_text(size = 16, color = "black"),
+          plot.title = element_text(hjust = 0.5))
+  
+  print(p)
+  
+  # Save the plot
+  ggsave(filename = here("output", paste0(mutation,"_glm", ".png")), plot = p, width = 10, height = 10/1.618)
+}
+
+rm(p)
+
+fwrite(glm_data, here("output", "SCN9A_GoF_glm.csv"), sep = ",")
+fwrite(glm_data_plot, here("output", "SCN9A_GoF_glm_mut_only.csv"), sep = ",")
+```
+
+
+```{r}
+OR_summary <- glm_data_plot %>%
+  mutate(
+    L95CI = ifelse(L95CI > 1000, Inf, L95CI),
+    U95CI = ifelse(U95CI > 1000, Inf, U95CI),
+    OR_CI = paste0(sprintf("%.2f", OR), " [", 
+                   ifelse(L95CI == Inf, "Inf", sprintf("%.2f", L95CI)), ", ", 
+                   ifelse(U95CI == Inf, "Inf", sprintf("%.2f", U95CI)), "]")
+  ) %>%
+  select(Variable, Phenotype, OR_CI, `P FDR Adj.`) %>%
+  pivot_wider(names_from = Phenotype, values_from = c(OR_CI, `P FDR Adj.`), names_glue = "{Phenotype}_{.value}")
+
+fwrite(OR_summary, here("output", "SCN9A_GoF_glm_OR_summary.csv"), sep = ",")
+```
+
+```{r}
+table(phenos$group)
+```
+
+# Grouped Analysis
+```{r}
+phenotypes <- c("chronic_pain", "dn4", "NaV_Blocker", "TCA", "Gabapentinoid", "Opioid_strong", "Opioid_dual")
+pheno_name <- c("Chronic Pain", "Neuropathic Pain", "NaV Blocker", "TCA", "Gabapentinoid", "Opioid (strong)", "Opioid (dual)")
+grouped_glm_data <- data.frame("Phenotype" = character(),
+                       "Variable" = character(),
+                       "N_Carriers" = numeric(),
+                       "Carriers_Pheno_Rate" = numeric(),
+                       "N_Controls" = numeric(),
+                       "Controls_Pheno_Rate" = numeric(),
+                       "Coef" = numeric(),
+                       "SE" = numeric(),
+                       "z" = numeric(),
+                       "P" = numeric(),
+                       "OR" = numeric(),
+                       "L95CI" = numeric(),
+                       "U95CI" = numeric(),
+                       stringsAsFactors = FALSE)
+
+for (i in seq_along(phenotypes)) {
+  # Fit the logistic regression model
+  model <- glm(as.formula(paste(phenotypes[i], "~ group_glm + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10")), data = phenos, family = binomial())
+  coef_summary <- summary(model)$coefficients
+  coef_summary <- as.data.frame(coef_summary)
+  coef_summary[, "OR"] <- exp(coef_summary[, "Estimate"])
+  coef_summary[, "L95CI"] <- exp(coef_summary[, "Estimate"] - 1.96 * coef_summary[, "Std. Error"])
+  coef_summary[, "U95CI"] <- exp(coef_summary[, "Estimate"] + 1.96 * coef_summary[, "Std. Error"])
+  coef_df <- as.data.frame(coef_summary)
+  coef_df$Variable <- rownames(coef_df)
+  coef_df$Variable <- gsub("group_glm", "", coef_df$Variable)
+  
+  # Define the desired order of variables
+variable_order <- c("(Intercept)", "R185H", "I228M", "P610T", "G616R",
+                    "K655R", "W719C", "I720K", "I739V", "V810M", "L1267V", "W1538R",
+                    "age", "sex", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10")
+  
+  # Convert the Variable column to a factor with the specified levels
+  coef_df$Variable <- factor(coef_df$Variable, levels = variable_order)
+  coef_df <- coef_df[order(coef_df$Variable), ]
+  
+  # Add the Phenotype column
+  coef_df$Phenotype <- pheno_name[i]
+  
+  # Add additional columns: number of carriers, rate of phenotype in carriers, number of controls, rate of phenotype in controls
+  phenos_summary <- phenos %>%
+    filter(!is.na(get(phenotypes[i]))) %>%
+    group_by(group_glm) %>%
+    summarise(
+      num_carriers = n(),
+      rate_phenotype_carriers = mean(get(phenotypes[i]), na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    filter(group_glm != "control")
+  
+  control_summary <- phenos %>%
+    filter(group_glm == "control" & !is.na(get(phenotypes[i]))) %>%
+    summarise(
+      num_controls = n(),
+      rate_phenotype_controls = mean(get(phenotypes[i]), na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  # Join the summary data to the coef_df
+  coef_df <- coef_df %>%
+    left_join(phenos_summary, by = c("Variable" = "group_glm")) %>%
+    mutate(num_controls = control_summary$num_controls,
+           rate_phenotype_controls = control_summary$rate_phenotype_controls)
+  
+  # Reorder columns to place Phenotype and Variable first
+  coef_df <- coef_df[, c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls", setdiff(names(coef_df), c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls")))]
+  rownames(coef_df) <- NULL
+  colnames(coef_df)[3:10] <- c("N_Carriers", "Carriers_Pheno_Rate", "N_Controls", "Controls_Pheno_Rate", "Coef", "SE", "z", "P")
+  
+  # Set columns 3 to 6 to NA for specific variables
+  coef_df[coef_df$Variable %in% c("(Intercept)", "age", "sex") | grepl("PC", coef_df$Variable), 3:6] <- NA
+
+  # Append the results to glm_data
+  glm_data <- rbind(glm_data, coef_df)
+}
+
+rm(phenotypes, pheno_name, phenos_summary, variable_order, control_summary, coef_summary, coef_df, model)
+```
+
+
+## Topology Plot
+```{r}
+topol_df <- table(mut$topology[which(mut$UKB_het < 50)])
+```
+

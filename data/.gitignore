@@ -1,0 +1,6 @@
+*.csv.gz
+*.rds
+*.vcf
+*.vcf.gz
+*.gcount
+*.scount
