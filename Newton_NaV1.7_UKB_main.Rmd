@@ -281,7 +281,12 @@ for (i in 1:length(mut$ID)){
   
   carriers$names[i] <- mut$SCN9A_1_protein_notation[i]
   carriers$het[i] <- list(extract_participants(vcf_sub, 1, mut$ID[i], "\\b0/1\\b"))
-  carriers$hom[i] <- list(extract_participants(vcf_sub, 1, mut$ID[i], "\\b1/1\\b"))
+  if (carriers$names[i] == "p.Arg1150Trp"){
+    carriers$hom[i] <- list(extract_participants(vcf_sub, 1, mut$ID[i], "\\b0/0\\b"))
+  }else{
+    carriers$hom[i] <- list(extract_participants(vcf_sub, 1, mut$ID[i], "\\b1/1\\b"))
+  }
+  
   
 }
 
@@ -300,6 +305,8 @@ carriers$het <- carriers$het[-19]
 carriers$hom <- carriers$hom[-19]
 carriers$both <- carriers$both[-19]
 
+cat("Total Carriers (incl R1150W):", length(unique(unlist(carriers$both))))
+
 
 # Remove R1150W mutation as so common 
 carriers$names <- carriers$names[-37]
@@ -307,6 +314,7 @@ carriers$het <- carriers$het[-37]
 carriers$hom <- carriers$hom[-37]
 carriers$both <- carriers$both[-37]
 
+cat("Total Carriers (R1150W removed):", length(unique(unlist(carriers$both))))
 ```
 
 # Rename mutations to shorthand
@@ -415,7 +423,6 @@ rm(matched_indices, mutation_group, mutation_list, group_counts)
 ```
 
 
-
 # Logistic Regression Analysis
 
 # Multiple Carriers
@@ -495,28 +502,80 @@ print(p)
 
 # Just the rare mutations <50
 ```{r}
+# Add a grouping variable for rare mutations
 phenos$group_rare_mutations <- ifelse(phenos$mutation %in% c('N641Y','P187L','R996C','M1532I','Q10R'), "rare", "exclude")
 phenos$group_rare_mutations[which(phenos$group == "control")] <- "control"
 phenos$group_rare_mutations[which(phenos$n_mutations > 1)] <- NA
 phenos$group_rare_mutations[which(phenos$group_rare_mutations == "exclude")] <- NA
 
-# Assuming model is already fitted and summary is obtained
-model <- glm(chronic_pain ~ group_rare_mutations + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = phenos, family = binomial())
+# Fit a logistic regression model
+model <- glm(chronic_pain ~ group_rare_mutations + age + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, 
+             data = phenos, family = binomial())
 coef_summary <- summary(model)$coefficients
 coef_summary <- as.data.frame(coef_summary)
 coef_summary[, "OR"] <- exp(coef_summary[, "Estimate"])
 coef_summary[, "L95CI"] <- exp(coef_summary[, "Estimate"] - 1.96 * coef_summary[, "Std. Error"])
 coef_summary[, "U95CI"] <- exp(coef_summary[, "Estimate"] + 1.96 * coef_summary[, "Std. Error"])
-coef_df <- as.data.frame(coef_summary)
-coef_df$Variable <- rownames(coef_df)
+coef_summary$Variable <- rownames(coef_summary)
+
+# Summarize the data for the rare and control groups
+rare_summary <- phenos %>%
+  group_by(group_rare_mutations) %>%
+  summarise(
+    num_carriers = n(),
+    rate_phenotype_carriers = mean(chronic_pain),
+    .groups = 'drop'
+  ) %>%
+  filter(group_rare_mutations == "rare")
+
+control_summary <- phenos %>%
+  filter(group_rare_mutations == "control") %>%
+  summarise(
+    num_controls = n(),
+    rate_phenotype_controls = mean(chronic_pain),
+    .groups = 'drop'
+  )
+
+# Join the summary data to the coefficients dataframe
+coef_summary <- coef_summary %>%
+  left_join(rare_summary, by = c("Variable" = "group_rare_mutationsrare")) %>%
+  mutate(num_controls = control_summary$num_controls,
+         rate_phenotype_controls = control_summary$rate_phenotype_controls)
+
+# Reorder the variables for the plot
+variable_order <- rev(c("(Intercept)", "rare", "age", "sex", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10"))
+coef_summary$Variable <- factor(coef_summary$Variable, levels = variable_order)
+coef_summary <- coef_summary[order(coef_summary$Variable), ]
+
+# Add additional columns and reformat
+coef_summary$Phenotype = "Chronic Pain"
+coef_summary$adjP <- p.adjust(coef_summary$`Pr(>|z|)`, method = "fdr")
+coef_summary <- coef_summary[, c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls", 
+                                 setdiff(names(coef_summary), c("Phenotype", "Variable", "num_carriers", "rate_phenotype_carriers", "num_controls", "rate_phenotype_controls")))]
+rownames(coef_summary) <- NULL
+colnames(coef_summary)[c(3:10, 14)] <- c("N_Carriers", "Carriers_Pheno_Rate", "N_Controls", "Controls_Pheno_Rate", "Coef", "SE", "z", "P", "FDR Adj. P")
+coef_summary <- coef_summary[, c(1:10, 14, 11:13)]
+
+# Create the plot
+p <- ggplot(coef_summary, aes(x = OR, y = Variable)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = L95CI, xmax = U95CI), height = 0.2) +
+  scale_x_continuous(limits = c(0.45, 1.55)) +
+  labs(title = "Rare Mutation Carriers",
+       y = "",
+       x = "Odds Ratio (OR)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 12, color = "black"),
+        axis.text.x = element_text(size = 12, color = "black"),
+        axis.title.x = element_text(size = 16, color = "black"),
+        plot.title = element_text(hjust = 0.5))
+
+print(p)
+
+# Save the plot (optional)
+# ggsave(filename = here("output", "rare_mutation_glm.png"), plot = p, width = 10, height = 10/1.618)
 
 ```
-
-#
-```{r}
-mut_count <- data.frame(table(phenos$mutation))
-```
-
 
 # Just one pheno
 ```{r}
@@ -686,7 +745,7 @@ rownames(glm_data) <- NULL
 rm(tmp, cols)
 ```
 
-Generate plots
+# Generate plots
 ```{r}
 glm_data_plot <- glm_data[which(glm_data$Variable %in% c("R185H", "I228M", "P610T", 
                                 "G616R", "K655R", "W719C", "I720K", "I739V",
@@ -826,7 +885,7 @@ variable_order <- c("(Intercept)", "R185H", "I228M", "P610T", "G616R",
   # Set columns 3 to 6 to NA for specific variables
   coef_df[coef_df$Variable %in% c("(Intercept)", "age", "sex") | grepl("PC", coef_df$Variable), 3:6] <- NA
 
-  # Append the results to glm_data
+  # Append the results to glm_data 
   glm_data <- rbind(glm_data, coef_df)
 }
 
@@ -836,6 +895,334 @@ rm(phenotypes, pheno_name, phenos_summary, variable_order, control_summary, coef
 
 ## Topology Plot
 ```{r}
-topol_df <- table(mut$topology[which(mut$UKB_het < 50)])
+topol_df <- data.frame(table(mut$topology))
+colnames(topol_df) <- c("domain", "all_count")
+length(topol_df$domain)
+print(topol_df$domain)
+tmp <- data.frame(table(mut$topology[which(mut$UKB_het == 0)]))
+colnames(tmp) <- c("domain", "rare_count")
+topol_df = merge(topol_df, tmp, by = "domain", all.x = TRUE)
+rm(tmp)
+tmp <- data.frame(table(mut$topology[which(mut$UKB_het > 0)]))
+colnames(tmp) <- c("domain", "ukbmut_count")
+topol_df = merge(topol_df, tmp, by = "domain", all.x = TRUE)
+rm(tmp)
+tmp <- data.frame(domain = 1:25)
+domains <- rev(c(
+"D4 S6", 
+"D4 S4-S5 Linker", 
+"D4 S4", 
+"D4 S2", 
+"D4 S1-S2 Linker", 
+"D3-D4 Linker", 
+"D3 S5", 
+"D3 S4-S5 Linker", 
+"D3 S3-S4 Linker", 
+"D2-D3 Linker",  
+"D2 S6", 
+"D2 S5-S6 Linker", 
+"D2 S5", 
+"D2 S4-S5 Linker", 
+"D2 S4", 
+"D2 S3", 
+"D2 S1", 
+"D1-D2 Linker", 
+"D1 S6", 
+"D1 S4-S5 Linker", 
+"D1 S4", 
+"D1 S3-S4 Linker",
+"D1 S2-S3 Linker", 
+"D1 S1", 
+"NT Cytoplasmic" 
+))
+tmp$domain <- domains
+
+tmp$length <- c(126, 19, 14, 6, 17, 19, 21, 345, 19, 20, 18, 16, 19, 63, 21, 226, 8, 17, 20, 91, 11, 19, 17, 19, 23)
+
+topol_df = merge(tmp, topol_df, by = "domain", all.x = TRUE)
+
+topol_df$all_freq <- topol_df$all_count / topol_df$length
+topol_df$rare_freq <- topol_df$rare_count / topol_df$length
+topol_df$ukbmut_freq <- topol_df$ukbmut_count / topol_df$length
+topol_df$domain <- factor(topol_df$domain, levels = (rev(domains)))
+
+
+
+p1 <- ggplot(data = topol_df, aes(x = domain, y = all_freq)) +
+  geom_bar(stat = "identity") +
+  theme_bw(base_size = 16) +
+  ylab("Number of Mutations (All) / Domain Length") +
+  xlab("Topological Domain") +
+  ylim(0, 0.35) +
+  coord_flip()
+p1
+# ggplotly(p1)
+
+p2 <- ggplot(data = topol_df, aes(x = domain, y = rare_freq)) +
+  geom_bar(stat = "identity") +
+  theme_bw(base_size = 16) +
+  ylab("Number of Mutations (Not in UKB) / Domain Length") +
+  xlab("Topological Domain") +
+  ylim(0, 0.35) +
+  coord_flip()
+p2
+# ggplotly(p2)
+
+p3 <- ggplot(data = topol_df, aes(x = domain, y = ukbmut_freq)) +
+  geom_bar(stat = "identity") +
+  theme_bw(base_size = 16) +
+  ylab("Number of Mutations (Present in UKB) / Domain Length") +
+  xlab("Topological Domain") +
+  ylim(0, 0.35) +
+  coord_flip()
+p3
+# ggplotly(p2)
+
+topol_long <- topol_df %>%
+  pivot_longer(cols = c(all_freq, rare_freq), 
+               names_to = "frequency_type", 
+               values_to = "frequency") %>%
+  mutate(frequency_type = factor(frequency_type, levels = c("all_freq", "rare_freq"), 
+                                 labels = c("All", "Ultra Rare")))
+
+# Create the grouped bar plot
+p <- ggplot(data = topol_long, aes(x = domain, y = frequency, fill = frequency_type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.75) +
+  theme_bw(base_size = 16) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 10),   # Adjust legend text size
+        legend.title = element_text(size = 12)) +
+  ylab("Number of Mutations / Domain Length") +
+  xlab("Topological Domain") +
+  ylim(0, 0.35) +
+  coord_flip() +
+  scale_fill_manual(values = c("black", "grey"), name = "Mutation Type")
+
+p
+
+ggsave(here("output", "NaV1.7_topology_mutperaa_graph.png"), plot = p, width = 10, scale = 1.618, dpi = 600)
+
+```
+
+```{r}
+tmp2 <- mut
+region_mapping <- list(
+  "D1-D2 Linker" = "Other Domain Linkers",
+  "D2-D3 Linker" = "Other Domain Linkers",
+  "D3-D4 Linker" = "D3-D4 Linker",
+  "D1 S1" = "S1-S3",
+  "D1 S2-S3 Linker" = "S1-S3",
+  "D1 S3-S4 Linker" = "S3-S4 linker",
+  "D1 S4" = "S4",
+  "D1 S4-S5 Linker" = "S4-S5 linker",
+  "D1 S6" = "S6",
+  "D2 S1" = "S1-S3",
+  "D2 S3" = "S1-S3",
+  "D2 S4" = "S4",
+  "D2 S4-S5 Linker" = "S4-S5 linker",
+  "D2 S5" = "S5",
+  "D2 S5-6 Linker" = "S5-S6 linker",
+  "D2 S5-S6 Linker" = "S5-S6 linker",
+  "D2 S6" = "S6",
+  "D3 S3-S4 Linker" = "S3-S4 linker",
+  "D3 S4-S5 Linker" = "S4-S5 linker",
+  "D3 S5" = "S5",
+  "D4 S1-S2 Linker" = "Other Domain Linkers",
+  "D4 S2" = "S1-S3",
+  "D4 S4" = "S4",
+  "D4 S4-S5 Linker" = "S4-S5 linker",
+  "D4 S6" = "S6",
+  "NT Cytoplasmic" = "NT Cytoplasmic"
+)
+
+# Map the regions using the mapping
+tmp2$grouped_topol <- sapply(tmp2$topology, function(x) region_mapping[[x]])
+
+grouped_topol_df <- data.frame(table(tmp2$grouped_topol))
+colnames(grouped_topol_df) <- c("domain", "all_count")
+tmp3 <- data.frame(table(tmp2$grouped_topol[which(mut$UKB_het == 0)]))
+colnames(tmp3) <- c("domain", "rare_count")
+grouped_topol_df = merge(grouped_topol_df, tmp3, by = "domain", all.x = TRUE)
+rm(tmp3)
+tmp3 <- data.frame(table(tmp2$grouped_topol[which(mut$UKB_het > 0)]))
+colnames(tmp3) <- c("domain", "ukbmut_count")
+grouped_topol_df = merge(grouped_topol_df, tmp3, by = "domain", all.x = TRUE)
+rm(tmp3)
+
+
+grouped_topol_df$domain <- factor(grouped_topol_df$domain, levels = (rev(c("NT Cytoplasmic", "S1-S3", "S3-S4 linker",
+                                                                         "S4", "S4-S5 linker", "S5", "S5-S6 linker",
+                                                                         "S6", "D3-D4 Linker", "Other Domain Linkers"))))
+
+
+grouped_topol_df_long <- grouped_topol_df %>%
+  pivot_longer(cols = c(all_count, rare_count),
+               names_to = "group",
+               values_to = "count") %>%
+  mutate(group = factor(group, levels = c("all_count", "rare_count"),
+                                 labels = c("All", "Not Present in UKB")))
+
+# Create the grouped bar plot
+p <- ggplot(data = grouped_topol_df_long, aes(x = domain, y = count, fill = group)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.75) +
+  theme_bw(base_size = 16) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 10),   # Adjust legend text size
+        legend.title = element_text(size = 12)) +
+  ylab("Number of Mutations") +
+  xlab("Topological Group") +
+  # ylim(0, 0.35) +
+  coord_flip() +
+  scale_fill_manual(values = c("black", "grey"), name = "Mutation Type")
+
+p
+ggsave(here("output", "NaV1.7_topology_regions_collapsed.png"), plot = p, width = 10, scale = 1.618, dpi = 600)
+
+
+```
+
+
+# Pathogenicity
+```{r, warning=False}
+seed = 12
+tmp <- mut
+tmp <- tmp[-which(tmp$ID == "2:166280510:C:A"),]
+tmp$rare <- ifelse(tmp$UKB_het < 1, "Ultra Rare", "Present in UKB")
+
+p1 <- ggplot(data = tmp, aes(x = rare, y = as.numeric(tmp$CADD_pathogenicity))) +
+  geom_violin(linewidth = 0.75) +  # Create violin plots for each group
+  geom_hline(yintercept = 15, colour = "red", linetype = "dashed", linewidth = 1) +  # Horizontal reference line
+  geom_vline(xintercept = 1.5, colour = "black", linewidth = 1) +  # Vertical reference line
+  theme_bw(base_size = 20) +
+  ylab("CADD PHRED Score (1 - 99)") +
+  xlab("") +
+  geom_jitter(shape = 16, position = position_jitter(width = 0.4, seed = seed), size = 3) +  # Add jittered points
+  geom_text_repel(aes(label = as.character(tmp$Protein_Mutation)), 
+            size = 4, max.overlaps = 6, position = position_jitter(width = 0.4, seed = seed), seed = seed) +  # Add text labels
+  stat_summary(fun.data = "mean_se", geom = "pointrange", colour = "red", linewidth = 1.2, size = 1.2) +  # Add mean with SE
+  scale_y_continuous(breaks = seq(0, 35, by = 5))  # Customize y-axis breaks
+
+wilcox.test(tmp$CADD_pathogenicity[which(tmp$rare == "Present in UKB")], tmp$CADD_pathogenicity[which(tmp$rare == "Ultra Rare")], alternative = "two.sided")
+
+p1 <- p1 + 
+  geom_segment(aes(x = 1, y = 33, xend = 2, yend = 33), 
+               colour = "black", linetype = "solid", linewidth = 1) +  # Add comparison line
+  geom_text(aes(x = 1.5, y = 34, label = "*"), size = 8, colour = "red")  # Add significance marker
+p1
+ggsave(here("output", "patho_CADD.png"), plot = p1, width = 10, scale = 1.618)
+
+
+
+```
+
+```{r, warning=False}
+
+p2 <- ggplot(data = tmp, aes(x = rare, y = as.numeric(tmp$AM_pathogenticity))) +
+  geom_violin(linewidth = 0.75) +  # Create violin plots for each group
+  geom_hline(yintercept = 0.7, colour = "red", linetype = "dashed", linewidth = 1) +
+  geom_hline(yintercept = 0.35, colour = "blue", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = 1.5, colour = "black", linewidth = 1) +  # Vertical reference line
+  theme_bw(base_size = 20) +
+  ylab("AlphaMissense Score (0 - 1)") +
+  xlab("") +
+  geom_jitter(shape = 16, position = position_jitter(width = 0.4, seed = seed), size = 3) +  # Add jittered points
+  geom_text_repel(aes(label = as.character(tmp$Protein_Mutation)), 
+            size = 4, max.overlaps = 6, position = position_jitter(width = 0.4, seed = seed), seed = seed) +  # Add text labels
+  stat_summary(fun.data = "mean_se", geom = "pointrange", colour = "red", linewidth = 1.2, size = 1.2) +  # Add mean with SE
+  scale_y_continuous(breaks = seq(0, 1, by = 0.2))  # Customize y-axis breaks
+
+wilcox.test(tmp$AM_pathogenticity[which(tmp$rare == "Present in UKB")], tmp$AM_pathogenticity[which(tmp$rare == "Ultra Rare")], alternative = "two.sided")
+
+p2 <- p2 + 
+  geom_segment(aes(x = 1, y = 1.025, xend = 2, yend = 1.025), 
+               colour = "black", linetype = "solid", linewidth = 1) +  # Add comparison line
+  geom_text(aes(x = 1.5, y = 1.05, label = "*"), size = 8, colour = "red")  # Add significance marker
+p2
+ggsave(here("output", "patho_alphamissense.png"), plot = p2, width = 10, scale = 1.618)
+
+```
+
+```{r, warning=False}
+
+p3 <- ggplot(data = tmp, aes(x = rare, y = as.numeric(tmp$EVE_pathogenicity))) +
+  geom_violin(linewidth = 0.75) +  # Create violin plots for each group
+  geom_hline(yintercept = 0.7, colour = "red", linetype = "dashed", linewidth = 1) +
+  geom_hline(yintercept = 0.35, colour = "blue", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = 1.5, colour = "black", linewidth = 1) +  # Vertical reference line
+  theme_bw(base_size = 20) +
+  ylab("EVE Score (0 - 1)") +
+  xlab("") +
+  geom_jitter(shape = 16, position = position_jitter(width = 0.4, seed = seed), size = 3) +  # Add jittered points
+  geom_text_repel(aes(label = as.character(tmp$Protein_Mutation)), 
+            size = 4, max.overlaps = 6, position = position_jitter(width = 0.4, seed = seed), seed = seed) +  # Add text labels
+  stat_summary(fun.data = "mean_se", geom = "pointrange", colour = "red", linewidth = 1.2, size = 1.2) +  # Add mean with SE
+  scale_y_continuous(breaks = seq(0, 1, by = 0.2))  # Customize y-axis breaks
+
+wilcox.test(tmp$EVE_pathogenicity[which(tmp$rare == "Present in UKB")], tmp$EVE_pathogenicity[which(tmp$rare == "Ultra Rare")], alternative = "two.sided")
+
+p3 <- p3 + 
+  geom_segment(aes(x = 1, y = 1.025, xend = 2, yend = 1.025), 
+               colour = "black", linetype = "solid", linewidth = 1) +  # Add comparison line
+  geom_text(aes(x = 1.5, y = 1.05, label = "*"), size = 8, colour = "red")  # Add significance marker
+p3
+ggsave(here("output", "patho_EVE.png"), plot = p3, width = 10, scale = 1.618)
+
+```
+
+
+# Power Calculation for Methods
+```{r}
+# Parameters
+rate_phenotype_controls <- 0.4175736  # Prevalence in controls
+rate_phenotype_increase_adjusted <- 0.5181727662810348
+num_controls <- 462158  # Number of controls
+num_carriers <- 50  # Number of mutation carriers
+alpha <- 0.05  # Significance level
+iterations <- 10000  # Number of simulations
+
+# Fisher's Exact Test Power Calculation
+fisher_power <- function(p1, p2, n1, n2, alpha, iterations) {
+  significant_results <- 0
+  
+  for (i in 1:iterations) {
+    # Simulate data
+    control_cases <- rbinom(1, n1, p1)
+    mutation_cases <- rbinom(1, n2, p2)
+    control_non_cases <- n1 - control_cases
+    mutation_non_cases <- n2 - mutation_cases
+    
+    # Create contingency table
+    contingency_table <- matrix(
+      c(control_cases, control_non_cases, mutation_cases, mutation_non_cases),
+      nrow = 2
+    )
+    
+    # Perform Fisher's exact test
+    p_value <- fisher.test(contingency_table, alternative = "two.sided")$p.value
+    
+    # Check if the result is significant
+    if (p_value < alpha) {
+      significant_results <- significant_results + 1
+    }
+  }
+  
+  # Calculate power
+  power <- significant_results / iterations
+  return(power)
+}
+
+# Compute power
+power <- fisher_power(
+  rate_phenotype_controls,
+  rate_phenotype_increase_adjusted,
+  num_controls,
+  num_carriers,
+  alpha,
+  iterations
+)
+
+# Output the power
+cat("Estimated Power:", power, "\n")
+
 ```
 
